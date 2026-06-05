@@ -1,0 +1,106 @@
+<#
+.SYNOPSIS
+  Offline / air-gapped install of CodeGraph from this source folder (Windows).
+
+.DESCRIPTION
+  Assumes the client workstation has:
+    - Node.js (>=18 <25) and npm on PATH
+    - npm configured against a registry it CAN reach (e.g. a private mirror)
+    - No git, no public GitHub access required
+
+  Does NOT call git, does NOT download anything from github.com. Dependencies
+  are pulled from whatever registry npm is already pointed at.
+
+.PARAMETER SkipClaude
+  Skip wiring Claude Code at the end.
+
+.PARAMETER Undo
+  Unlink the global `codegraph` symlink and exit.
+
+.EXAMPLE
+  .\scripts\offline-install.ps1
+  .\scripts\offline-install.ps1 -SkipClaude
+  .\scripts\offline-install.ps1 -Undo
+#>
+[CmdletBinding()]
+param(
+  [switch]$SkipClaude,
+  [switch]$Undo
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Resolve repo root from this script's location (no git).
+$Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location $Repo
+
+$Pkg     = node -p "require('./package.json').name"
+$Version = node -p "require('./package.json').version"
+
+if ($Undo) {
+  Write-Host "[offline-install] unlinking $Pkg"
+  & npm unlink -g $Pkg 2>$null
+  Write-Host "[offline-install] done"
+  exit 0
+}
+
+# --- Node version gate (matches package.json engines) ----------------------
+$NodeMajor = [int](node -p "process.versions.node.split('.')[0]")
+if ($NodeMajor -lt 18 -or $NodeMajor -ge 25) {
+  Write-Error "[offline-install] Node $NodeMajor is unsupported. Requires >=18 <25."
+  exit 1
+}
+
+$Registry = npm config get registry
+Write-Host "[offline-install] repo:     $Repo"
+Write-Host "[offline-install] package:  $Pkg@$Version"
+Write-Host "[offline-install] node:     $(node --version)"
+Write-Host "[offline-install] registry: $Registry"
+
+# --- install deps --------------------------------------------------------
+if (Test-Path 'package-lock.json') {
+  Write-Host "[offline-install] npm ci"
+  & npm ci
+} else {
+  Write-Host "[offline-install] npm install"
+  & npm install
+}
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# --- build ---------------------------------------------------------------
+Write-Host "[offline-install] npm run build"
+& npm run build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# --- link as global codegraph -------------------------------------------
+Write-Host "[offline-install] npm link"
+& npm link
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Avoid PS 7+ null-conditional (?.) — locked-down Windows clients often ship
+# only Windows PowerShell 5.1, where ?. fails to parse.
+$cmd    = Get-Command codegraph -ErrorAction SilentlyContinue
+$Linked = if ($cmd) { $cmd.Source } else { '(not on PATH)' }
+Write-Host "[offline-install] codegraph -> $Linked"
+
+# --- wire Claude Code (non-interactive) ---------------------------------
+# Invoke the just-built binary directly instead of relying on `codegraph` being
+# visible on PATH in this PowerShell session — `npm link`'s shim may not be
+# picked up until the user opens a new shell.
+if (-not $SkipClaude) {
+  Write-Host "[offline-install] wiring Claude Code"
+  & node (Join-Path $Repo 'dist/bin/codegraph.js') install --target claude -y
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+Write-Host ""
+Write-Host "[OK] CodeGraph $Version installed offline from source."
+Write-Host "  binary: $Linked"
+Write-Host "  source: $Repo"
+Write-Host ""
+Write-Host "Next:"
+Write-Host "  codegraph --version"
+Write-Host "  cd <your-project>; codegraph init; codegraph index"
+Write-Host ""
+Write-Host "To uninstall:"
+Write-Host "  .\scripts\offline-install.ps1 -Undo"
