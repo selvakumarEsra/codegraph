@@ -65,17 +65,35 @@ export class DatabaseConnection {
 
     configureConnection(db);
 
-    // Run schema initialization
+    // Run schema initialization atomically. If any statement in schema.sql
+    // fails partway (e.g. FTS5 missing from this Node's bundled SQLite —
+    // schema.sql contains a `CREATE VIRTUAL TABLE … USING fts5`), the
+    // schema_versions row from earlier in the same script would otherwise
+    // commit alongside half the tables; a later open() would then see an
+    // old version stamp on a partially-populated schema and try to re-run
+    // migrations that ADD columns the table already has → "duplicate
+    // column name". Wrap in a transaction so the whole DB state rolls
+    // back, and remove the empty SQLite file (and WAL sidecars) afterward
+    // so a re-init starts from a clean slate instead of refusing with
+    // "already initialized".
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
-    db.exec(schema);
-
-    // Record current schema version so migrations aren't re-applied on open
-    const currentVersion = getCurrentVersion(db);
-    if (currentVersion < CURRENT_SCHEMA_VERSION) {
-      db.prepare(
-        'INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)'
-      ).run(CURRENT_SCHEMA_VERSION, Date.now(), 'Initial schema includes all migrations');
+    try {
+      db.transaction(() => {
+        db.exec(schema);
+        const currentVersion = getCurrentVersion(db);
+        if (currentVersion < CURRENT_SCHEMA_VERSION) {
+          db.prepare(
+            'INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)'
+          ).run(CURRENT_SCHEMA_VERSION, Date.now(), 'Initial schema includes all migrations');
+        }
+      })();
+    } catch (e) {
+      try { db.close(); } catch { /* ignore */ }
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        try { fs.unlinkSync(dbPath + suffix); } catch { /* ignore */ }
+      }
+      throw e;
     }
 
     return new DatabaseConnection(db, dbPath, backend);

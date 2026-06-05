@@ -26,6 +26,25 @@ interface Migration {
  * Note: Version 1 is the initial schema, handled by schema.sql
  * Future migrations go here.
  */
+/**
+ * SQLite `ALTER TABLE … ADD COLUMN` is not idempotent — it errors with
+ * "duplicate column name" if the column already exists. The three columns
+ * added in migration #2 are also present in schema.sql, so an open() that
+ * runs this migration against a DB whose tables already have them (a
+ * half-baked init from before the transaction wrapper in `initialize()`
+ * landed) would fail every time. Guard each ALTER with a column check.
+ */
+function hasColumn(db: SqliteDatabase, table: string, column: string): boolean {
+  // `table` is a hard-coded constant from this file, not user input — safe to
+  // interpolate. (Can't bind it: SQLite's pragma_table_info table-valued
+  // function requires the table name as a literal argument.) Use prepare/all
+  // here rather than db.pragma(), which only returns the first row.
+  const rows = db
+    .prepare(`SELECT 1 AS x FROM pragma_table_info('${table}') WHERE name = ?`)
+    .all(column);
+  return rows.length > 0;
+}
+
 const migrations: Migration[] = [
   {
     version: 2,
@@ -37,9 +56,17 @@ const migrations: Migration[] = [
           value TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
-        ALTER TABLE unresolved_refs ADD COLUMN file_path TEXT NOT NULL DEFAULT '';
-        ALTER TABLE unresolved_refs ADD COLUMN language TEXT NOT NULL DEFAULT 'unknown';
-        ALTER TABLE edges ADD COLUMN provenance TEXT DEFAULT NULL;
+      `);
+      if (!hasColumn(db, 'unresolved_refs', 'file_path')) {
+        db.exec(`ALTER TABLE unresolved_refs ADD COLUMN file_path TEXT NOT NULL DEFAULT '';`);
+      }
+      if (!hasColumn(db, 'unresolved_refs', 'language')) {
+        db.exec(`ALTER TABLE unresolved_refs ADD COLUMN language TEXT NOT NULL DEFAULT 'unknown';`);
+      }
+      if (!hasColumn(db, 'edges', 'provenance')) {
+        db.exec(`ALTER TABLE edges ADD COLUMN provenance TEXT DEFAULT NULL;`);
+      }
+      db.exec(`
         CREATE INDEX IF NOT EXISTS idx_unresolved_file_path ON unresolved_refs(file_path);
         CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
       `);
