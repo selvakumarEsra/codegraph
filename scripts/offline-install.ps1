@@ -44,10 +44,52 @@ if ($Undo) {
   exit 0
 }
 
-# --- Node version gate (matches package.json engines) ----------------------
+# --- Node version gate ---------------------------------------------------
+# Tighter than package.json engines (>=18 <25): the runtime needs node:sqlite
+# (Node 22.5+) AND that SQLite must have FTS5 compiled in. CodeGraph's own
+# release bundle pins v24.16.0 for that reason; older Node builds either lack
+# node:sqlite entirely or ship SQLite without FTS5.
 $NodeMajor = [int](node -p "process.versions.node.split('.')[0]")
-if ($NodeMajor -lt 18 -or $NodeMajor -ge 25) {
-  Write-Error "[offline-install] Node $NodeMajor is unsupported. Requires >=18 <25."
+$NodeMinor = [int](node -p "process.versions.node.split('.')[1]")
+if ($NodeMajor -lt 22 -or
+    ($NodeMajor -eq 22 -and $NodeMinor -lt 5) -or
+    $NodeMajor -ge 25) {
+  $nv = node --version
+  Write-Error "[offline-install] Node $nv is unsupported. Requires >=22.5 <25 (Node 24.x recommended)."
+  exit 1
+}
+
+# --- FTS5 capability probe ---------------------------------------------
+# Fail fast with a clear remediation message instead of letting `codegraph init`
+# die with a cryptic "no such module: fts5" deep inside indexing. node:sqlite
+# is present from 22.5+, but FTS5 is only enabled in newer Node builds —
+# Node 22.x typically ships SQLite without it.
+$probeScript = @'
+try {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE VIRTUAL TABLE t USING fts5(x)");
+  console.log('OK');
+} catch (e) {
+  console.log('FAIL:' + e.message);
+}
+'@
+$probe = (node -e $probeScript 2>$null)
+if ($probe -eq 'OK') {
+  # FTS5 ok
+} elseif ($probe -like 'FAIL:*') {
+  $msg = $probe.Substring(5)
+  $nv  = node --version
+  Write-Error @"
+[offline-install] SQLite probe failed: $msg
+
+CodeGraph requires Node.js whose bundled SQLite has FTS5 enabled. Your Node
+($nv) does not. Install Node 24.x and re-run this script. CodeGraph's
+release bundle pins v24.16.0 as the known-good version.
+"@
+  exit 1
+} else {
+  Write-Error "[offline-install] unable to probe node:sqlite. Need Node >=22.5 (24.x recommended)."
   exit 1
 }
 
