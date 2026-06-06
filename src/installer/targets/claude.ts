@@ -69,6 +69,41 @@ function settingsJsonPath(loc: Location): string {
 function instructionsPath(loc: Location): string {
   return path.join(configDir(loc), 'CLAUDE.md');
 }
+function commandsDir(loc: Location): string {
+  return path.join(configDir(loc), 'commands');
+}
+function agentsDir(loc: Location): string {
+  return path.join(configDir(loc), 'agents');
+}
+
+/**
+ * Plugin-asset source dir at the package root — same `commands/`,
+ * `agents/`, `hooks/` directories that ship the plugin manifest path.
+ * Resolves identically from `src/installer/targets/claude.ts` (dev /
+ * test) and `dist/installer/targets/claude.js` (installed npm package).
+ */
+function packageAssetPath(...segments: string[]): string {
+  return path.join(__dirname, '..', '..', '..', ...segments);
+}
+
+/** Slash commands the installer copies into Claude's commands dir. */
+const SHIPPED_COMMANDS = ['cg-sync.md', 'cg-trace.md', 'cg-explore.md', 'cg-impact.md'] as const;
+/** Subagents the installer copies into Claude's agents dir. */
+const SHIPPED_AGENTS = ['codegraph-explorer.md'] as const;
+
+/** The PostToolUse + SessionStart hooks the installer writes. */
+const CODEGRAPH_HOOKS = [
+  {
+    event: 'PostToolUse',
+    matcher: 'Edit|Write|MultiEdit',
+    hook: { type: 'command', command: 'codegraph sync --quiet', async: true },
+  },
+  {
+    event: 'SessionStart',
+    matcher: 'startup|resume',
+    hook: { type: 'command', command: 'codegraph sync --quiet' },
+  },
+] as const;
 
 class ClaudeCodeTarget implements AgentTarget {
   readonly id = 'claude' as const;
@@ -120,6 +155,15 @@ class ClaudeCodeTarget implements AgentTarget {
     const hookCleanup = cleanupLegacyHooks(loc);
     if (hookCleanup.action === 'removed') files.push(hookCleanup);
 
+    // 2c. Write the current auto-sync hooks (PostToolUse + SessionStart
+    // running `codegraph sync --quiet`). Gated on autoAllow — same
+    // posture as the permissions list since both auto-execute commands
+    // without prompting. Idempotent: re-running with identical hooks
+    // already in settings.json returns 'unchanged'.
+    if (opts.autoAllow) {
+      files.push(writeHooksEntry(loc));
+    }
+
     // 3. CLAUDE.md instructions — no longer written. The codegraph
     // usage guidance now ships solely in the MCP server's `initialize`
     // response (see `mcp/server-instructions.ts`), which Claude Code
@@ -129,6 +173,13 @@ class ClaudeCodeTarget implements AgentTarget {
     // behind so an upgrade self-heals — same idiom as the hook cleanup.
     const instrCleanup = removeInstructionsEntry(loc);
     if (instrCleanup.action === 'removed') files.push(instrCleanup);
+
+    // 4. Slash commands + the codegraph-explorer subagent. NOT gated on
+    // autoAllow — these only execute when the user / agent invokes them
+    // explicitly. Copies the same .md files that ship for the plugin
+    // install path, so the two flows can't drift apart.
+    for (const f of writeCommandsEntries(loc)) files.push(f);
+    for (const f of writeAgentsEntries(loc)) files.push(f);
 
     return { files };
   }
@@ -181,16 +232,23 @@ class ClaudeCodeTarget implements AgentTarget {
       files.push({ path: settingsPath, action: 'not-found' });
     }
 
-    // 2b. Strip any stale auto-sync hooks a pre-0.8 install left in
-    // settings.json. The hook-cleanup step was lost when the installer
-    // moved to the per-target architecture; restoring it here means
-    // uninstall — and the npm `preuninstall` hook that drives it — fully
-    // reverses a legacy install.
-    const hookCleanup = cleanupLegacyHooks(loc);
-    if (hookCleanup.action === 'removed') files.push(hookCleanup);
+    // 2b. Strip auto-sync hooks the installer wrote — both the
+    // current `codegraph sync --quiet` form (writeHooksEntry) and the
+    // legacy `mark-dirty`/`sync-if-dirty` forms (pre-0.8). Two passes
+    // so each predicate stays narrow and we never accidentally strip a
+    // user-written hook.
+    const currentCleanup = cleanupCurrentHooks(loc);
+    if (currentCleanup.action === 'removed') files.push(currentCleanup);
+    const legacyCleanup = cleanupLegacyHooks(loc);
+    if (legacyCleanup.action === 'removed') files.push(legacyCleanup);
 
     // 3. Instructions — strip the legacy CodeGraph block if present.
     files.push(removeInstructionsEntry(loc));
+
+    // 4. Slash commands + subagent — remove our shipped files; sibling
+    // user-written .md files in the same dir are left untouched.
+    for (const f of removeCommandsEntries(loc)) files.push(f);
+    for (const f of removeAgentsEntries(loc)) files.push(f);
 
     return { files };
   }
@@ -202,7 +260,13 @@ class ClaudeCodeTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc), settingsJsonPath(loc), instructionsPath(loc)];
+    return [
+      mcpJsonPath(loc),
+      settingsJsonPath(loc),
+      instructionsPath(loc),
+      ...SHIPPED_COMMANDS.map((f) => path.join(commandsDir(loc), f)),
+      ...SHIPPED_AGENTS.map((f) => path.join(agentsDir(loc), f)),
+    ];
   }
 }
 
@@ -261,16 +325,20 @@ function cleanupLegacyLocalMcp(): WriteResult['files'][number] | null {
 }
 
 /**
- * True when a Claude Code hook `command` is one of the auto-sync hooks
- * a pre-0.8 install wrote. Those installers added
- * `PostToolUse(Edit|Write) → codegraph mark-dirty` and
- * `Stop → codegraph sync-if-dirty` (local builds used the
- * `npx @selvakumaresra/codegraph …` form, which still contains the
- * `codegraph <subcommand>` substring). Both subcommands were later
+ * True when a Claude Code hook `command` is one of the **pre-0.8**
+ * codegraph auto-sync hooks: `codegraph mark-dirty` (PostToolUse) /
+ * `codegraph sync-if-dirty` (Stop). Both subcommands have since been
  * removed from the CLI, so the Stop hook fails every turn with
- * "unknown command 'sync-if-dirty'". Matching on the codegraph-scoped
- * subcommand keeps unrelated user hooks (e.g. GitKraken's
- * `gk ai hook run`) untouched.
+ * "unknown command 'sync-if-dirty'" — stripping them on install
+ * (self-heal on upgrade) is what keeps the upgrade quiet. Local builds
+ * also wrote the npx form, which still contains the `codegraph
+ * <subcommand>` substring; the substring match covers both. Sibling
+ * user hooks (e.g. GitKraken's `gk ai hook run`) match nothing here.
+ *
+ * The **current** auto-sync hook form (`codegraph sync --quiet`) is
+ * NOT matched here — install writes those and would re-strip its own
+ * work if this predicate covered them. The uninstall flow uses
+ * `isCurrentCodegraphHookCommand` for those, on top of this one.
  */
 function isLegacyCodegraphHookCommand(command: unknown): boolean {
   if (typeof command !== 'string') return false;
@@ -281,21 +349,31 @@ function isLegacyCodegraphHookCommand(command: unknown): boolean {
 }
 
 /**
- * Remove stale codegraph auto-sync hooks from Claude `settings.json`.
- *
- * Surgical at the individual-command level: only entries matching
- * `isLegacyCodegraphHookCommand` are dropped, so a sibling hook sharing
- * a matcher group (or the Stop event) with ours survives. We prune a
- * matcher group only once its `hooks` array is empty, an event only
- * once it has no groups left, and `hooks` itself only once every event
- * is gone — and none of that runs unless we actually removed a
- * codegraph command, so a settings.json with no legacy hooks is left
- * byte-for-byte untouched and reported `unchanged`.
- *
- * Exported so it can be unit-tested directly and reused by both
- * `install` (an upgrade self-heals) and `uninstall`.
+ * True when a hook `command` is one of the auto-sync hooks
+ * `writeHooksEntry` writes in this release (`codegraph sync --quiet`).
+ * Uninstall-only — install must NOT match these or it would destroy
+ * the entries it just wrote.
  */
-export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] {
+function isCurrentCodegraphHookCommand(command: unknown): boolean {
+  if (typeof command !== 'string') return false;
+  return CODEGRAPH_HOOKS.some(({ hook }) => command === hook.command);
+}
+
+/**
+ * Strip codegraph hook commands matched by `predicate` from Claude
+ * `settings.json`. Surgical at the individual-command level: only
+ * matched entries are dropped, so a sibling hook sharing a matcher
+ * group (or the Stop event) survives. Matcher groups are pruned only
+ * once their `hooks` array is empty, events only once they have no
+ * groups left, and `hooks` itself only once every event is gone — and
+ * none of that runs unless we actually removed a command, so a
+ * settings.json with no matching hooks is left byte-for-byte untouched
+ * and reported `unchanged`.
+ */
+function stripHooksMatching(
+  loc: Location,
+  predicate: (command: unknown) => boolean,
+): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
   if (!fs.existsSync(file)) return { path: file, action: 'not-found' };
 
@@ -305,7 +383,6 @@ export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] 
     return { path: file, action: 'unchanged' };
   }
 
-  // Pass 1: drop the legacy command(s) from inside every matcher group.
   let removedAny = false;
   for (const event of Object.keys(hooks)) {
     const groups = hooks[event];
@@ -313,18 +390,13 @@ export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] 
     for (const group of groups) {
       if (!group || !Array.isArray(group.hooks)) continue;
       const before = group.hooks.length;
-      group.hooks = group.hooks.filter(
-        (h: any) => !isLegacyCodegraphHookCommand(h?.command),
-      );
+      group.hooks = group.hooks.filter((h: any) => !predicate(h?.command));
       if (group.hooks.length !== before) removedAny = true;
     }
   }
 
   if (!removedAny) return { path: file, action: 'unchanged' };
 
-  // Pass 2: prune empty matcher groups, then events with no groups
-  // left, then an empty top-level `hooks`. Guarded by `removedAny` so
-  // we never restructure a settings.json that had no codegraph hooks.
   for (const event of Object.keys(hooks)) {
     const groups = hooks[event];
     if (!Array.isArray(groups)) continue;
@@ -337,6 +409,25 @@ export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] 
 
   writeJsonFile(file, settings);
   return { path: file, action: 'removed' };
+}
+
+/**
+ * Remove stale **pre-0.8** codegraph auto-sync hooks
+ * (`codegraph mark-dirty` / `codegraph sync-if-dirty`) from Claude
+ * `settings.json`. Safe to call from both `install` (self-heal on
+ * upgrade) and `uninstall`. Exported so it can be unit-tested directly.
+ */
+export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] {
+  return stripHooksMatching(loc, isLegacyCodegraphHookCommand);
+}
+
+/**
+ * Remove the current-release auto-sync hooks (`codegraph sync --quiet`)
+ * written by `writeHooksEntry`. Uninstall-only — install would
+ * destroy its own write if this ran there.
+ */
+export function cleanupCurrentHooks(loc: Location): WriteResult['files'][number] {
+  return stripHooksMatching(loc, isCurrentCodegraphHookCommand);
 }
 
 export function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
@@ -374,6 +465,105 @@ export function removeInstructionsEntry(loc: Location): WriteResult['files'][num
   const file = instructionsPath(loc);
   const action = removeMarkedSection(file, CODEGRAPH_SECTION_START, CODEGRAPH_SECTION_END);
   return { path: file, action };
+}
+
+/**
+ * Write codegraph's auto-sync hooks into Claude `settings.json`. Merges
+ * idempotently into any user-defined hooks: a matcher group sharing our
+ * exact matcher string is reused; sibling matchers / events / events are
+ * untouched. Returns `unchanged` when our two hook commands are already
+ * present byte-for-byte in the right places.
+ *
+ * Gated by `install()` on `autoAllow` — same posture as the permissions
+ * list. The matching uninstall lives in `cleanupLegacyHooks` (whose
+ * matcher predicate covers BOTH the new `codegraph sync --quiet` form
+ * and the legacy `codegraph mark-dirty`/`sync-if-dirty` forms).
+ */
+export function writeHooksEntry(loc: Location): WriteResult['files'][number] {
+  const file = settingsJsonPath(loc);
+  const created = !fs.existsSync(file);
+  const settings = readJsonFile(file);
+  const beforeJson = JSON.stringify(settings);
+
+  if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
+    settings.hooks = {};
+  }
+  for (const { event, matcher, hook } of CODEGRAPH_HOOKS) {
+    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+    let group = settings.hooks[event].find(
+      (g: any) => g && g.matcher === matcher,
+    );
+    if (!group) {
+      group = { matcher, hooks: [] };
+      settings.hooks[event].push(group);
+    }
+    if (!Array.isArray(group.hooks)) group.hooks = [];
+    // Idempotent: skip if a command-equal entry is already there.
+    if (!group.hooks.some((h: any) => h && h.command === hook.command)) {
+      group.hooks.push({ ...hook });
+    }
+  }
+
+  const afterJson = JSON.stringify(settings);
+  if (beforeJson === afterJson && !created) {
+    return { path: file, action: 'unchanged' };
+  }
+  writeJsonFile(file, settings);
+  return { path: file, action: created ? 'created' : 'updated' };
+}
+
+/**
+ * Copy our shipped slash commands (commands/cg-*.md) into the user's
+ * commands dir (~/.claude/commands/ globally, ./.claude/commands/
+ * locally). Per-file idempotent: a destination with identical bytes is
+ * reported `unchanged`. Sibling user-written .md files in the same dir
+ * are never touched.
+ */
+export function writeCommandsEntries(loc: Location): WriteResult['files'] {
+  return SHIPPED_COMMANDS.map((name) => copyAsset(packageAssetPath('commands', name), path.join(commandsDir(loc), name)));
+}
+
+/**
+ * Copy our shipped subagent (agents/codegraph-explorer.md) into the
+ * user's agents dir. Same idempotency contract as writeCommandsEntries.
+ */
+export function writeAgentsEntries(loc: Location): WriteResult['files'] {
+  return SHIPPED_AGENTS.map((name) => copyAsset(packageAssetPath('agents', name), path.join(agentsDir(loc), name)));
+}
+
+/**
+ * Inverse of writeCommandsEntries: delete each cg-*.md we shipped, if
+ * present. A file the user replaced with their own content is still
+ * removed — match the existing uninstall posture for files codegraph
+ * owns (the user can re-add their version after).
+ */
+export function removeCommandsEntries(loc: Location): WriteResult['files'] {
+  return SHIPPED_COMMANDS.map((name) => removeFile(path.join(commandsDir(loc), name)));
+}
+
+/** Inverse of writeAgentsEntries. */
+export function removeAgentsEntries(loc: Location): WriteResult['files'] {
+  return SHIPPED_AGENTS.map((name) => removeFile(path.join(agentsDir(loc), name)));
+}
+
+function copyAsset(src: string, dest: string): WriteResult['files'][number] {
+  const body = fs.readFileSync(src, 'utf-8');
+  if (fs.existsSync(dest)) {
+    const existing = fs.readFileSync(dest, 'utf-8');
+    if (existing === body) return { path: dest, action: 'unchanged' };
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, body);
+    return { path: dest, action: 'updated' };
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, body);
+  return { path: dest, action: 'created' };
+}
+
+function removeFile(p: string): WriteResult['files'][number] {
+  if (!fs.existsSync(p)) return { path: p, action: 'not-found' };
+  fs.unlinkSync(p);
+  return { path: p, action: 'removed' };
 }
 
 export const claudeTarget: AgentTarget = new ClaudeCodeTarget();

@@ -24,7 +24,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ALL_TARGETS, getTarget } from '../src/installer/targets/registry';
 import { uninstallTargets } from '../src/installer';
-import { claudeTarget, cleanupLegacyHooks } from '../src/installer/targets/claude';
+import { claudeTarget, cleanupLegacyHooks, cleanupCurrentHooks } from '../src/installer/targets/claude';
 
 function mkTmpDir(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-targets-${label}-`));
@@ -307,18 +307,38 @@ describe('Claude target — specifics', () => {
     };
   }
 
-  it("install strips stale codegraph auto-sync hooks but keeps the user's GitKraken hook", () => {
+  it("install strips stale codegraph auto-sync hooks but keeps the user's GitKraken hook (and writes the current sync hooks)", () => {
     const file = seedSettings('global', legacyHookSettings());
 
     claudeTarget.install('global', { autoAllow: true });
 
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    expect(after.hooks?.PostToolUse).toBeUndefined();
+
+    // Legacy mark-dirty is gone — its PostToolUse group was the only
+    // one before install. Install then writes its OWN PostToolUse
+    // hook (matcher='Edit|Write|MultiEdit') for the current
+    // `codegraph sync --quiet` form, so PostToolUse is defined now,
+    // just with the new entry instead of the legacy mark-dirty one.
+    const postCommands = (after.hooks?.PostToolUse ?? []).flatMap((g: any) =>
+      (g.hooks ?? []).map((h: any) => h.command),
+    );
+    expect(postCommands).not.toContain('codegraph mark-dirty');
+    expect(postCommands).toContain('codegraph sync --quiet');
+
+    // Legacy sync-if-dirty is gone from Stop; the user's GitKraken
+    // hook (unrelated) survives.
     const stopCommands = (after.hooks?.Stop ?? []).flatMap((g: any) =>
       (g.hooks ?? []).map((h: any) => h.command),
     );
     expect(stopCommands).not.toContain('codegraph sync-if-dirty');
     expect(stopCommands.some((c: string) => c.includes('gk') && c.includes('ai hook run'))).toBe(true);
+
+    // SessionStart sync hook is added too.
+    const sessionCommands = (after.hooks?.SessionStart ?? []).flatMap((g: any) =>
+      (g.hooks ?? []).map((h: any) => h.command),
+    );
+    expect(sessionCommands).toContain('codegraph sync --quiet');
+
     expect(after.permissions?.allow).toContain('mcp__codegraph__codegraph_search');
   });
 
@@ -381,6 +401,103 @@ describe('Claude target — specifics', () => {
 
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(after.hooks).toBeUndefined();
+  });
+
+  // ---- New (current-release) hooks + commands + subagent ----
+
+  it('install writes PostToolUse and SessionStart sync hooks when autoAllow is on', () => {
+    const file = path.join(tmpHome, '.claude', 'settings.json');
+    claudeTarget.install('global', { autoAllow: true });
+
+    const settings = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const postHooks = settings.hooks?.PostToolUse?.find((g: any) => g.matcher === 'Edit|Write|MultiEdit')?.hooks ?? [];
+    expect(postHooks.find((h: any) => h.command === 'codegraph sync --quiet')?.async).toBe(true);
+    const sessionHooks = settings.hooks?.SessionStart?.find((g: any) => g.matcher === 'startup|resume')?.hooks ?? [];
+    expect(sessionHooks.some((h: any) => h.command === 'codegraph sync --quiet')).toBe(true);
+    expect(sessionHooks[0]?.async).toBeUndefined(); // SessionStart is sync
+  });
+
+  it('install does NOT write sync hooks when autoAllow is off', () => {
+    const settingsPath = path.join(tmpHome, '.claude', 'settings.json');
+    claudeTarget.install('global', { autoAllow: false });
+
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(settings.hooks).toBeUndefined();
+    }
+  });
+
+  it('install copies the shipped slash commands and subagent', () => {
+    claudeTarget.install('global', { autoAllow: false });
+
+    for (const name of ['cg-sync.md', 'cg-trace.md', 'cg-explore.md', 'cg-impact.md']) {
+      expect(fs.existsSync(path.join(tmpHome, '.claude', 'commands', name))).toBe(true);
+    }
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'agents', 'codegraph-explorer.md'))).toBe(true);
+
+    // Spot-check the subagent body has the expected restricted-tools allowlist.
+    const explorer = fs.readFileSync(path.join(tmpHome, '.claude', 'agents', 'codegraph-explorer.md'), 'utf-8');
+    expect(explorer).toContain('name: codegraph-explorer');
+    expect(explorer).toMatch(/tools:\s*mcp__codegraph__/);
+  });
+
+  it('install preserves a user-written sibling command in the same dir', () => {
+    const userCmd = path.join(tmpHome, '.claude', 'commands', 'my-cmd.md');
+    fs.mkdirSync(path.dirname(userCmd), { recursive: true });
+    fs.writeFileSync(userCmd, '---\ndescription: mine\n---\nHello\n');
+
+    claudeTarget.install('global', { autoAllow: false });
+
+    expect(fs.readFileSync(userCmd, 'utf-8')).toBe('---\ndescription: mine\n---\nHello\n');
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'commands', 'cg-trace.md'))).toBe(true);
+  });
+
+  it('uninstall removes the shipped commands + subagent + current-release hooks', () => {
+    claudeTarget.install('global', { autoAllow: true });
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'commands', 'cg-trace.md'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'agents', 'codegraph-explorer.md'))).toBe(true);
+
+    claudeTarget.uninstall('global');
+
+    for (const name of ['cg-sync.md', 'cg-trace.md', 'cg-explore.md', 'cg-impact.md']) {
+      expect(fs.existsSync(path.join(tmpHome, '.claude', 'commands', name))).toBe(false);
+    }
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'agents', 'codegraph-explorer.md'))).toBe(false);
+
+    // hooks block is gone (nothing else was using it).
+    const settings = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf-8'));
+    expect(settings.hooks).toBeUndefined();
+  });
+
+  it('uninstall preserves a user-written sibling command in the same dir', () => {
+    claudeTarget.install('global', { autoAllow: false });
+    const userCmd = path.join(tmpHome, '.claude', 'commands', 'my-cmd.md');
+    fs.writeFileSync(userCmd, '---\ndescription: mine\n---\nHello\n');
+
+    claudeTarget.uninstall('global');
+
+    expect(fs.readFileSync(userCmd, 'utf-8')).toBe('---\ndescription: mine\n---\nHello\n');
+  });
+
+  it('cleanupCurrentHooks strips codegraph sync hooks without touching unrelated user hooks', () => {
+    const file = seedSettings('global', {
+      hooks: {
+        PostToolUse: [
+          {
+            matcher: 'Edit|Write|MultiEdit',
+            hooks: [
+              { type: 'command', command: 'codegraph sync --quiet', async: true },
+              { type: 'command', command: 'echo hello' },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(cleanupCurrentHooks('global').action).toBe('removed');
+
+    const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(after.hooks.PostToolUse[0].hooks.map((h: any) => h.command)).toEqual(['echo hello']);
   });
 });
 
