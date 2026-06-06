@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-06
+
+First publication of the Claude Code–only fork to npm as `@selvakumaresra/codegraph`.
+
 ### Breaking Changes
 
 - This fork is **Claude Code only**. The multi-agent installer (Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, Kiro) and all of its plumbing — auto-detection, multi-select prompts, per-agent target files, TOML/JSONC writers — have been removed. `codegraph install` now just configures Claude Code. The `--target` and `--print-config` flags are kept in vestigial form for backwards compatibility (only `claude` / `auto` / `all` / `none` are accepted) but no longer do anything meaningful. If you need other agents, use upstream [`@colbymchenry/codegraph`](https://www.npmjs.com/package/@colbymchenry/codegraph) instead.
