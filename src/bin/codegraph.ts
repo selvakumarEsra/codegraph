@@ -42,7 +42,7 @@ async function loadCodeGraph(): Promise<typeof import('../index')> {
     console.error(`\x1b[31m${getGlyphs().err}\x1b[0m Failed to load CodeGraph modules.`);
     console.error(`\n  Node: ${process.version}  Platform: ${process.platform} ${process.arch}`);
     console.error(`\n  Error: ${msg}`);
-    console.error('\n  Try reinstalling with: npm install -g @colbymchenry/codegraph\n');
+    console.error('\n  Try reinstalling with: npm install -g @selvakumaresra/codegraph\n');
     process.exit(1);
   }
 }
@@ -1571,29 +1571,25 @@ program
  */
 program
   .command('install')
-  .description('Install codegraph MCP server into one or more agents (Claude Code, Cursor, Codex CLI, opencode, Hermes Agent)')
-  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
+  .description('Install codegraph MCP server into Claude Code')
   .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
-  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=auto, auto-allow on')
-  .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
-  .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
+  .option('-y, --yes', 'Non-interactive: defaults to --location=global, auto-allow on')
+  .option('--no-permissions', 'Skip writing the auto-allow permissions list')
+  .option('--print-config', 'Print MCP config snippet for Claude Code and exit (no file writes)')
+  // -t/--target is vestigial — kept so existing `--target claude` / `--target auto`
+  // invocations (including our own offline-install scripts) keep working.
+  .option('-t, --target <ids>', '(vestigial) accepted: "claude" | "auto" | "all" | "none"')
   .action(async (opts: {
     target?: string;
     location?: string;
     yes?: boolean;
     permissions?: boolean;
-    printConfig?: string;
+    printConfig?: boolean;
   }) => {
     if (opts.printConfig) {
-      const { getTarget, listTargetIds } = await import('../installer/targets/registry');
-      const target = getTarget(opts.printConfig);
-      if (!target) {
-        const known = listTargetIds().join(', ');
-        error(`Unknown target "${opts.printConfig}". Known: ${known}.`);
-        process.exit(1);
-      }
+      const { claudeTarget } = await import('../installer/targets/claude');
       const loc = (opts.location === 'local' ? 'local' : 'global') as 'global' | 'local';
-      process.stdout.write(target.printConfig(loc));
+      process.stdout.write(claudeTarget.printConfig(loc));
       return;
     }
 
@@ -1631,17 +1627,18 @@ program
 /**
  * codegraph uninstall
  *
- * Inverse of `install`. Removes the codegraph MCP server entry,
- * instructions block, and permissions from every agent (or a
- * `--target` subset). Prompts global-vs-local when not given. Does NOT
- * delete the `.codegraph/` index — that's `codegraph uninit`.
+ * Inverse of `install`. Removes the codegraph MCP server entry and
+ * permissions from Claude Code. Prompts global-vs-local when not
+ * given. Does NOT delete the `.codegraph/` index — that's
+ * `codegraph uninit`.
  */
 program
   .command('uninstall')
-  .description('Remove codegraph from your agents (Claude Code, Cursor, Codex CLI, opencode, Hermes Agent)')
-  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "all". Default: all')
+  .description('Remove codegraph from Claude Code')
   .option('-l, --location <where>', 'Uninstall location: "global" or "local". Default: prompt')
-  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=all')
+  .option('-y, --yes', 'Non-interactive: defaults to --location=global')
+  // vestigial — kept so existing `--target claude` invocations keep working.
+  .option('-t, --target <ids>', '(vestigial) accepted: "claude" | "auto" | "all" | "none"')
   .action(async (opts: {
     target?: string;
     location?: string;

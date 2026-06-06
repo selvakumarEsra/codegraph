@@ -1,26 +1,18 @@
 /**
- * CodeGraph Interactive Installer
+ * CodeGraph Installer (Claude Code only).
  *
- * Multi-target: writes MCP server config + instructions for the
- * agents the user picks (Claude Code, Cursor, Codex CLI, opencode,
- * Hermes Agent, Gemini CLI, Antigravity IDE).
- * Defaults to the Claude-only behavior for backwards compatibility
- * when no targets are explicitly chosen and nothing else is detected.
- *
- * Uses @clack/prompts for the interactive UI; `runInstallerWithOptions`
- * is the non-interactive entry point used by the `--target` /
- * `--print-config` CLI flags.
+ * Writes the codegraph MCP server config + auto-allow permissions into
+ * Claude Code at the chosen location (global / local). Uses
+ * @clack/prompts for the interactive UI; `runInstallerWithOptions` is
+ * the non-interactive entry called from the `--target` / `--yes` CLI
+ * flags. (The `--target` flag is preserved for backwards compatibility
+ * but only accepts `claude` / `auto` / `all` / `none`.)
  */
 
 import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import {
-  ALL_TARGETS,
-  detectAll,
-  getTarget,
-  resolveTargetFlag,
-} from './targets/registry';
+import { claudeTarget } from './targets/claude';
 import type { AgentTarget, Location, TargetId } from './targets/types';
 import { getGlyphs } from '../ui/glyphs';
 // Import the lightweight submodules directly (not the ../sync barrel, which
@@ -61,7 +53,11 @@ function getVersion(): string {
 }
 
 export interface RunInstallerOptions {
-  /** Comma-separated target list, or `auto` / `all` / `none`. */
+  /**
+   * Vestigial — preserved for backwards compatibility with the
+   * multi-agent CLI. Accepted values: `claude` (the only real target),
+   * `auto` / `all` (synonymous), `none` (skip). Anything else throws.
+   */
   target?: string;
   /** Skip the location prompt; use this value directly. */
   location?: Location;
@@ -69,15 +65,13 @@ export interface RunInstallerOptions {
   autoAllow?: boolean;
   /**
    * Skip every confirm and use defaults: location=global,
-   * autoAllow=true, target=auto. For scripting / CI.
+   * autoAllow=true. For scripting / CI.
    */
   yes?: boolean;
 }
 
 /**
- * Interactive entry point — preserves the historical UX (`codegraph
- * install` with no args goes through the prompts), but now starts
- * the targets multi-select pre-populated with detected agents.
+ * Interactive entry — `codegraph install` with no args runs this.
  */
 export async function runInstaller(): Promise<void> {
   return runInstallerWithOptions({});
@@ -88,25 +82,28 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
 
   clack.intro(`CodeGraph v${getVersion()}`);
 
-  // --yes implies all defaults; explicit flags still win.
   const useDefaults = opts.yes === true;
 
-  // Step 1: which agent targets? Asked FIRST so the user knows what
-  // they're committing to before we touch npm or disk. Detection
-  // probes the user-provided location if known, else 'global' as the
-  // most common default — labels are a hint, not load-bearing.
-  const detectionLocation: Location = opts.location ?? 'global';
-  const targets = await resolveTargets(clack, opts, detectionLocation, useDefaults);
-  if (targets.length === 0) {
-    clack.outro('No agent targets selected — nothing to do.');
+  // `--target=none` — explicit skip, matches the historical contract.
+  if (opts.target === 'none') {
+    clack.outro('Skipped — no agent configured.');
     return;
   }
+  // Any other value is accepted (claude / auto / all / undefined); we
+  // only have one target to write.
+  if (opts.target !== undefined
+      && !['claude', 'auto', 'all'].includes(opts.target)) {
+    throw new Error(
+      `Unknown --target value "${opts.target}". This build is Claude-only; ` +
+      `accepted values are 'claude' (default), 'auto', 'all', or 'none'.`,
+    );
+  }
 
-  // Step 2: install the codegraph npm package on PATH (always offered;
-  // matches existing behavior). Skipped when --yes (assume present).
+  // Step 1: install the codegraph CLI on PATH (always offered; skipped
+  // with --yes since CI assumes it's there).
   if (!useDefaults) {
     const shouldInstallGlobally = await clack.confirm({
-      message: 'Install the codegraph CLI on your PATH? (Required so agents can launch the MCP server)',
+      message: 'Install the codegraph CLI on your PATH? (Required so Claude Code can launch the MCP server)',
       initialValue: true,
     });
     if (clack.isCancel(shouldInstallGlobally)) {
@@ -117,56 +114,46 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
       const s = clack.spinner();
       s.start('Installing codegraph CLI...');
       try {
-        execSync('npm install -g @colbymchenry/codegraph', { stdio: 'pipe', windowsHide: true });
+        execSync('npm install -g @selvakumaresra/codegraph', { stdio: 'pipe', windowsHide: true });
         s.stop('Installed codegraph CLI on PATH');
       } catch {
         s.stop('Could not install (permission denied)');
-        clack.log.warn('Try: sudo npm install -g @colbymchenry/codegraph');
+        clack.log.warn('Try: sudo npm install -g @selvakumaresra/codegraph');
       }
     } else {
-      clack.log.info('Skipped CLI install — agents will not be able to launch the MCP server without it');
+      clack.log.info('Skipped CLI install — Claude Code will not be able to launch the MCP server without it');
     }
   }
 
-  // Step 3: where the per-agent config files should land.
+  // Step 2: global vs local.
   let location: Location;
   if (opts.location) {
     location = opts.location;
   } else if (useDefaults) {
     location = 'global';
   } else {
-    // If every selected target is global-only (e.g. Codex), skip the
-    // prompt and force user-wide — project-local would just produce
-    // skip warnings.
-    const allGlobalOnly = targets.every((t) => !t.supportsLocation('local'));
-    if (allGlobalOnly) {
-      location = 'global';
-      clack.log.info('Writing user-wide configs (selected agents have no project-local config).');
-    } else {
-      const sel = await clack.select({
-        message: 'Apply agent configs to all your projects, or just this one?',
-        options: [
-          { value: 'global' as const, label: 'All projects', hint: '~/.claude, ~/.cursor, etc.' },
-          { value: 'local'  as const, label: 'Just this project', hint: './.claude, ./.cursor, etc.' },
-        ],
-        initialValue: 'global' as const,
-      });
-      if (clack.isCancel(sel)) {
-        clack.cancel('Installation cancelled.');
-        process.exit(0);
-      }
-      location = sel;
+    const sel = await clack.select({
+      message: 'Apply Claude Code config to all your projects, or just this one?',
+      options: [
+        { value: 'global' as const, label: 'All projects', hint: '~/.claude.json + ~/.claude/settings.json' },
+        { value: 'local'  as const, label: 'Just this project', hint: './.mcp.json + ./.claude/settings.json' },
+      ],
+      initialValue: 'global' as const,
+    });
+    if (clack.isCancel(sel)) {
+      clack.cancel('Installation cancelled.');
+      process.exit(0);
     }
+    location = sel;
   }
 
-  // Step 4: auto-allow permissions (only meaningful for Claude;
-  // skipped silently by other targets).
+  // Step 3: auto-allow permissions.
   let autoAllow: boolean;
   if (opts.autoAllow !== undefined) {
     autoAllow = opts.autoAllow;
   } else if (useDefaults) {
     autoAllow = true;
-  } else if (targets.some((t) => t.id === 'claude')) {
+  } else {
     const ans = await clack.confirm({
       message: 'Auto-allow CodeGraph commands? (Skips permission prompts in Claude Code)',
       initialValue: true,
@@ -176,33 +163,23 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
       process.exit(0);
     }
     autoAllow = ans;
-  } else {
-    autoAllow = false;
   }
 
-  // Step 5: per-target install loop.
-  for (const target of targets) {
-    if (!target.supportsLocation(location)) {
-      clack.log.warn(
-        `${target.displayName}: skipped — does not support --location=${location}.`,
-      );
-      continue;
-    }
-    const result = target.install(location, { autoAllow });
-    for (const file of result.files) {
-      const verb = file.action === 'unchanged'
-        ? 'Unchanged'
-        : file.action === 'created' ? 'Created'
-          : file.action === 'removed' ? 'Removed'
-            : 'Updated';
-      clack.log.success(`${target.displayName}: ${verb} ${tildify(file.path)}`);
-    }
-    for (const note of result.notes ?? []) {
-      clack.log.info(`${target.displayName}: ${note}`);
-    }
+  // Step 4: write Claude config.
+  const result = claudeTarget.install(location, { autoAllow });
+  for (const file of result.files) {
+    const verb = file.action === 'unchanged'
+      ? 'Unchanged'
+      : file.action === 'created' ? 'Created'
+        : file.action === 'removed' ? 'Removed'
+          : 'Updated';
+    clack.log.success(`Claude Code: ${verb} ${tildify(file.path)}`);
+  }
+  for (const note of result.notes ?? []) {
+    clack.log.info(`Claude Code: ${note}`);
   }
 
-  // Step 6: for local install, initialize the project.
+  // Step 5: for local install, initialize the project.
   if (location === 'local') {
     await initializeLocalProject(clack, useDefaults);
   }
@@ -211,23 +188,18 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     clack.note('cd your-project\ncodegraph init -i', 'Quick start');
   }
 
-  const finalNote = targets.length > 0
-    ? `Done! Restart your agent${targets.length > 1 ? 's' : ''} to use CodeGraph.`
-    : 'Done!';
-  clack.outro(finalNote);
+  clack.outro('Done! Restart Claude Code to use CodeGraph.');
 }
 
 export interface RunUninstallerOptions {
   /**
-   * Comma-separated target list, or `auto` / `all` / `none`. Defaults
-   * to `all` — uninstall sweeps every known agent and reports which
-   * ones it actually touched, so the user doesn't have to know where
-   * they configured it.
+   * Vestigial — preserved for backwards compatibility. Accepts `claude`
+   * / `auto` / `all` / `none`. Anything else throws.
    */
   target?: string;
   /** Skip the location prompt; use this value directly. */
   location?: Location;
-  /** Non-interactive: location=global, target=all, no prompts. */
+  /** Non-interactive: location=global, no prompts. */
   yes?: boolean;
 }
 
@@ -235,29 +207,25 @@ export type UninstallStatus = 'removed' | 'not-configured' | 'unsupported';
 
 /**
  * Per-target outcome of an uninstall sweep. `removed` means we deleted
- * at least one thing; `not-configured` means the agent had no codegraph
- * config at this location (nothing to do); `unsupported` means the
- * agent has no config concept for this location (e.g. Codex is
- * global-only, so a `local` uninstall skips it).
+ * at least one thing; `not-configured` means there was no codegraph
+ * config at this location (nothing to do); `unsupported` is dead in
+ * the Claude-only build but kept for the test surface.
  */
 export interface UninstallReport {
   id: TargetId;
   displayName: string;
   status: UninstallStatus;
-  /** Absolute paths we actually edited/removed (action === 'removed'). */
+  /** Absolute paths we actually edited/removed. */
   removedPaths: string[];
   /** Verbatim notes from the target (rare for uninstall). */
   notes: string[];
 }
 
 /**
- * Pure uninstall sweep — no prompts, no I/O beyond the targets' own
- * file edits. Exposed (and unit-tested) separately from the clack UI in
- * `runUninstaller` so the aggregation logic can be asserted directly.
- *
- * Each target's `uninstall()` is already safe to call when nothing was
- * installed (it returns `not-found` actions), so this is safe to run
- * across every target unconditionally.
+ * Pure uninstall sweep — no prompts. Exposed (and unit-tested)
+ * separately from the clack UI so the aggregation logic can be
+ * asserted directly. Safe to call when nothing was installed (target
+ * uninstall returns `not-found` actions).
  */
 export function uninstallTargets(
   targets: readonly AgentTarget[],
@@ -290,12 +258,9 @@ export function uninstallTargets(
 
 /**
  * Interactive uninstaller — the inverse of `runInstallerWithOptions`.
- * Asks global-vs-local first (unless `--location`/`--yes` is given),
- * then sweeps every agent target (or the `--target` subset) and prints
- * one block per agent so the user sees exactly which providers it hit.
- *
- * Removes only what install wrote (MCP server entry, instructions
- * block, permissions) — never the `.codegraph/` index, which `codegraph
+ * Asks global-vs-local, then sweeps Claude Code's config at that
+ * location. Removes only what install wrote (MCP server entry,
+ * permissions) — never the `.codegraph/` index, which `codegraph
  * uninit` owns.
  */
 export async function runUninstaller(opts: RunUninstallerOptions): Promise<void> {
@@ -305,9 +270,19 @@ export async function runUninstaller(opts: RunUninstallerOptions): Promise<void>
 
   const useDefaults = opts.yes === true;
 
-  // Step 1: which location — asked FIRST, the one decision the user
-  // must make. Global sweeps ~/.claude, ~/.codex, etc.; local sweeps
-  // the configs in this project directory.
+  if (opts.target === 'none') {
+    clack.outro('Skipped — nothing to uninstall.');
+    return;
+  }
+  if (opts.target !== undefined
+      && !['claude', 'auto', 'all'].includes(opts.target)) {
+    throw new Error(
+      `Unknown --target value "${opts.target}". This build is Claude-only; ` +
+      `accepted values are 'claude' (default), 'auto', 'all', or 'none'.`,
+    );
+  }
+
+  // Step 1: location.
   let location: Location;
   if (opts.location) {
     location = opts.location;
@@ -317,8 +292,8 @@ export async function runUninstaller(opts: RunUninstallerOptions): Promise<void>
     const sel = await clack.select({
       message: 'Remove CodeGraph from all your projects, or just this one?',
       options: [
-        { value: 'global' as const, label: 'All projects (global)', hint: '~/.claude, ~/.cursor, ~/.codex, ~/.config/opencode, ~/.hermes, ~/.gemini, ~/.kiro' },
-        { value: 'local'  as const, label: 'Just this project (local)', hint: './.claude, ./.cursor, ./opencode.jsonc, ./.gemini, ./.kiro' },
+        { value: 'global' as const, label: 'All projects (global)', hint: '~/.claude.json + ~/.claude/settings.json' },
+        { value: 'local'  as const, label: 'Just this project (local)', hint: './.mcp.json + ./.claude/settings.json' },
       ],
       initialValue: 'global' as const,
     });
@@ -329,52 +304,29 @@ export async function runUninstaller(opts: RunUninstallerOptions): Promise<void>
     location = sel;
   }
 
-  // Step 2: which agents. Default is every agent, so the user doesn't
-  // have to remember where they installed it — unconfigured agents are
-  // reported as "nothing to remove" and left untouched. An explicit
-  // --target subsets this.
-  let targets: AgentTarget[];
-  if (opts.target !== undefined) {
-    targets = resolveTargetFlag(opts.target, location);
-  } else {
-    targets = [...ALL_TARGETS];
-  }
-  if (targets.length === 0) {
-    clack.outro('No agent targets selected — nothing to do.');
-    return;
-  }
-
-  // Step 3: sweep + per-agent feedback.
-  const reports = uninstallTargets(targets, location);
-  const removed = reports.filter((r) => r.status === 'removed');
-
-  for (const r of reports) {
-    if (r.status === 'removed') {
-      for (const p of r.removedPaths) {
-        clack.log.success(`${r.displayName}: removed ${tildify(p)}`);
-      }
-    } else if (r.status === 'not-configured') {
-      clack.log.info(`${r.displayName}: not configured — nothing to remove`);
-    } else {
-      clack.log.info(`${r.displayName}: skipped — ${r.notes[0] ?? 'unsupported location'}`);
+  // Step 2: sweep + feedback. uninstallTargets always returns one
+  // report per input target — the non-null assertion is safe.
+  const report = uninstallTargets([claudeTarget], location)[0]!;
+  if (report.status === 'removed') {
+    for (const p of report.removedPaths) {
+      clack.log.success(`Claude Code: removed ${tildify(p)}`);
     }
+  } else if (report.status === 'not-configured') {
+    clack.log.info(`Claude Code: not configured — nothing to remove`);
+  } else {
+    clack.log.info(`Claude Code: skipped — ${report.notes[0] ?? 'unsupported location'}`);
   }
 
-  // Step 4: for local uninstall, the index dir is separate — point at
-  // `uninit` so the user knows it's still there (and how to remove it).
+  // Step 3: for local uninstall, the index dir is separate.
   if (location === 'local' && fs.existsSync(path.join(process.cwd(), '.codegraph'))) {
     clack.log.info('The .codegraph/ index for this project is still here. Run `codegraph uninit` to delete it.');
   }
 
-  // Step 5: summary.
-  if (removed.length > 0) {
-    const names = removed.map((r) => r.displayName).join(', ');
-    clack.outro(
-      `Removed CodeGraph from ${removed.length} agent${removed.length > 1 ? 's' : ''}: ${names}. ` +
-      `Restart ${removed.length > 1 ? 'them' : 'it'} to apply.`,
-    );
+  // Step 4: summary.
+  if (report.status === 'removed') {
+    clack.outro('Removed CodeGraph from Claude Code. Restart it to apply.');
   } else {
-    clack.outro(`CodeGraph was not configured in any ${location} agent — nothing to remove.`);
+    clack.outro(`CodeGraph was not configured in Claude Code at the ${location} location — nothing to remove.`);
   }
 }
 
@@ -388,60 +340,10 @@ function tildify(p: string): string {
   return p;
 }
 
-async function resolveTargets(
-  clack: typeof import('@clack/prompts'),
-  opts: RunInstallerOptions,
-  location: Location,
-  useDefaults: boolean,
-): Promise<AgentTarget[]> {
-  // Explicit --target flag wins.
-  if (opts.target !== undefined) {
-    return resolveTargetFlag(opts.target, location);
-  }
-
-  // --yes implies auto-detect.
-  if (useDefaults) {
-    return resolveTargetFlag('auto', location);
-  }
-
-  // Interactive multi-select.
-  const detected = detectAll(location);
-  const initialValues = detected
-    .filter(({ detection }) => detection.installed)
-    .map(({ target }) => target.id);
-  // If nothing detected, default to Claude alone (matches the
-  // historical default and the smallest-surprise outcome).
-  const initial = initialValues.length > 0 ? initialValues : ['claude'];
-
-  const choice = await clack.multiselect<string>({
-    message: 'Which agents should CodeGraph configure?',
-    options: ALL_TARGETS.map((t) => {
-      const det = detected.find(({ target }) => target.id === t.id)!.detection;
-      const flag = det.installed ? '(detected)' : '(not found)';
-      const globalOnly = !t.supportsLocation('local') ? ' — global only' : '';
-      return {
-        value: t.id,
-        label: `${t.displayName} ${flag}${globalOnly}`,
-      };
-    }),
-    initialValues: initial,
-    required: false,
-  });
-
-  if (clack.isCancel(choice)) {
-    clack.cancel('Installation cancelled.');
-    process.exit(0);
-  }
-
-  return choice
-    .map((id) => getTarget(id))
-    .filter((t): t is AgentTarget => t !== undefined);
-}
-
 /**
  * Initialize CodeGraph in the current project (for local installs), then
  * offer the watch fallback when the live watcher won't run here (see
- * offerWatchFallback). Agent-agnostic by nature.
+ * offerWatchFallback).
  */
 async function initializeLocalProject(
   clack: typeof import('@clack/prompts'),
@@ -495,11 +397,8 @@ async function initializeLocalProject(
 /**
  * When the live file watcher will be disabled for this project (e.g. WSL2
  * /mnt drives, or CODEGRAPH_NO_WATCH), the index would silently go stale.
- * Explain that, and offer to keep it fresh automatically via git hooks
- * (commit / pull / checkout) instead of manual `codegraph sync`.
- *
- * No-op on environments where the watcher runs normally, so it's safe to
- * call unconditionally after init.
+ * Offer to keep it fresh automatically via git hooks instead of manual
+ * `codegraph sync`. No-op on environments where the watcher runs normally.
  */
 export async function offerWatchFallback(
   clack: typeof import('@clack/prompts'),

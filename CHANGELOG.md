@@ -9,6 +9,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- This fork is **Claude Code only**. The multi-agent installer (Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, Kiro) and all of its plumbing — auto-detection, multi-select prompts, per-agent target files, TOML/JSONC writers — have been removed. `codegraph install` now just configures Claude Code. The `--target` and `--print-config` flags are kept in vestigial form for backwards compatibility (only `claude` / `auto` / `all` / `none` are accepted) but no longer do anything meaningful. If you need other agents, use upstream [`@colbymchenry/codegraph`](https://www.npmjs.com/package/@colbymchenry/codegraph) instead.
+- Published under a new npm name: `@selvakumaresra/codegraph` (was `@colbymchenry/codegraph`). Existing global installs from the upstream package keep working — uninstall first (`npm uninstall -g @colbymchenry/codegraph`) before installing this fork to avoid two `codegraph` binaries on PATH.
+
 ### New Features
 
 - Install CodeGraph from a local source folder onto offline workstations with `scripts/offline-install.sh` (macOS / Linux) or `scripts/offline-install.ps1` (Windows) — uses your existing npm registry, with no GitHub access required.

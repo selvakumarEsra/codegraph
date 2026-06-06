@@ -2,13 +2,10 @@
 
 # CodeGraph
 
-### Supercharge Claude Code, Cursor, Codex, OpenCode, Hermes Agent, Gemini, Antigravity, and Kiro with Semantic Code Intelligence
+### Supercharge Claude Code with Semantic Code Intelligence
 
 **~16% cheaper · ~58% fewer tool calls · 100% local**
 
-### [Documentation & Website →](https://colbymchenry.github.io/codegraph/)
-
-[![npm version](https://img.shields.io/npm/v/@colbymchenry/codegraph.svg)](https://www.npmjs.com/package/@colbymchenry/codegraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Self-contained](https://img.shields.io/badge/Node.js-bundled%20%C2%B7%20none%20required-brightgreen.svg)](https://nodejs.org/)
 
@@ -17,21 +14,8 @@
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#supported-platforms)
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-agents)
-[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#supported-agents)
-[![Codex](https://img.shields.io/badge/Codex-supported-blueviolet.svg)](#supported-agents)
-[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-agents)
-[![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-supported-blueviolet.svg)](#supported-agents)
-[![Gemini](https://img.shields.io/badge/Gemini-supported-blueviolet.svg)](#supported-agents)
-[![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](#supported-agents)
-[![Kiro](https://img.shields.io/badge/Kiro-supported-blueviolet.svg)](#supported-agents)
 
-<br>
-
-**The CodeGraph platform is coming** — for every PR, know exactly what to test, what could break, which flows are affected, and whether business logic is compromised.
-
-<a href="https://getcodegraph.com"><img alt="Join the waitlist for early beta access" src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/waitlist.svg?v=2" height="52"></a>
-
-<sub>Get <b>early beta access</b> to the hosted product · <a href="https://getcodegraph.com">getcodegraph.com</a></sub>
+<sub>This is a Claude Code–focused fork of <a href="https://github.com/colbymchenry/codegraph">colbymchenry/codegraph</a> — the multi-agent installer (Cursor, Codex, opencode, Hermes, Gemini, Antigravity, Kiro) and its 2,800-LoC plumbing have been removed so the installer and tests cover one agent only.</sub>
 
 </div>
 
@@ -39,33 +23,28 @@
 
 ### 1. Install the CLI
 
-**No Node.js required** — one command grabs the right build for your OS:
+Requires Node.js 22.5+ (Node 24.x recommended — its bundled SQLite has FTS5, which CodeGraph needs):
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
+npm i -g @selvakumaresra/codegraph
 ```
 
-Already have Node? Use npm instead (works on any version):
+Offline / air-gapped client workstation? Clone or copy this repo onto the machine and run:
 
 ```bash
-npm i -g @colbymchenry/codegraph
+./scripts/offline-install.sh        # macOS / Linux
+.\scripts\offline-install.ps1       # Windows
 ```
 
-<sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The installer puts `codegraph` on your PATH but **doesn't change your current shell** — open a new terminal before the next step so the command resolves.</sub>
+The offline installer probes for FTS5 up front, runs `npm install` against whatever registry npm is already pointed at (your private mirror is fine), builds, `npm link`s, and wires Claude Code — no GitHub access required.
 
-### 2. Wire up your agent(s)
-
-In a **new terminal**, run the installer to connect CodeGraph to the agents you use:
+### 2. Wire up Claude Code
 
 ```bash
 codegraph install
 ```
 
-<sub>Detects and auto-configures Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro — wiring the CodeGraph MCP server into each. **This is the step that connects CodeGraph to your agent;** installing the CLI in step 1 does not do it on its own. (Shortcut: `npx @colbymchenry/codegraph` downloads and runs this in one go.)</sub>
+<sub>Writes the CodeGraph MCP server into `~/.claude.json` (global) or `./.mcp.json` (project), plus the auto-allow permissions list into Claude's `settings.json`. Use `--yes` for non-interactive defaults (global location, auto-allow on).</sub>
 
 ### 3. Initialize each project
 
@@ -74,23 +53,15 @@ cd your-project
 codegraph init -i
 ```
 
-<sub>`codegraph init` just creates the local `.codegraph/` index directory; adding `-i` (`--index`) also builds the initial graph in the same step. Without `-i`, run `codegraph index` afterwards to populate it.</sub>
-
-<div align="center">
-
-![1_C_VYnhpys0UHrOuOgpgoyw](https://github.com/user-attachments/assets/f168182f-4d9a-44e0-94d7-08d018cc8a3a)
-
-</div>
+<sub>`codegraph init` creates the local `.codegraph/` index directory; adding `-i` (`--index`) also builds the initial graph in the same step. Without `-i`, run `codegraph index` afterwards.</sub>
 
 ### Uninstall
-
-Changed your mind? One command removes CodeGraph from every agent it configured:
 
 ```bash
 codegraph uninstall
 ```
 
-<sub>Reverses the installer — strips CodeGraph's MCP server config, instructions, and permissions from each configured agent. Your project indexes (`.codegraph/`) are left untouched; remove those per-project with `codegraph uninit`. Use `--target` to remove from specific agents, or `--yes` to run non-interactively.</sub>
+<sub>Strips CodeGraph's MCP server config and permissions from Claude Code. Your project indexes (`.codegraph/`) are left untouched; remove those per-project with `codegraph uninit`.</sub>
 
 ---
 
@@ -231,7 +202,7 @@ CodeGraph cuts **tokens, tool calls, and wall-clock time on every repo** — acr
 <details>
 <summary><strong>How auto-syncing works — and why you don't need to run <code>codegraph sync</code> manually</strong></summary>
 
-When your agent (Claude Code, Cursor, Codex, opencode) launches `codegraph serve --mcp`, three layers keep the index in step with your code — and make sure the agent never gets a silent wrong answer in the brief window between an edit and the next sync:
+When Claude Code launches `codegraph serve --mcp`, three layers keep the index in step with your code — and make sure the agent never gets a silent wrong answer in the brief window between an edit and the next sync:
 
 1. **File watcher with debounced auto-sync.** A native FSEvents / inotify / ReadDirectoryChangesW watcher captures every source-file create / modify / delete and triggers a re-index after a debounce window (default `2000ms`, tunable via `CODEGRAPH_WATCH_DEBOUNCE_MS`, clamped to `[100ms, 60s]`). Bursts of edits collapse into a single sync.
 
@@ -251,7 +222,6 @@ agent writes src/Widget.ts
 
 The handful of cases where manual `codegraph sync` makes sense: the watcher is disabled (sandboxed environments, or `CODEGRAPH_NO_DAEMON=1`), or you're scripting against the index outside an agent session and want a pre-flight sync at the start of your script.
 
-→ Full deep-dive in [Guides → Indexing a Project](https://colbymchenry.github.io/codegraph/guides/indexing/#stay-fresh-automatically).
 
 </details>
 
@@ -311,58 +281,40 @@ Each bridge emits edges tagged `provenance:'heuristic'` with `metadata.synthesiz
 
 ## Quick Start
 
-### 1. Run the Installer
-
 ```bash
-npx @colbymchenry/codegraph
+npm i -g @selvakumaresra/codegraph
+codegraph install --yes           # writes ~/.claude.json + ~/.claude/settings.json
+cd your-project && codegraph init -i
+# restart Claude Code
 ```
 
-The installer will:
-- Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes Agent**, **Gemini CLI**, **Antigravity IDE**, **Kiro**
-- Prompt to install `codegraph` on your PATH (so agents can launch the MCP server)
-- Ask whether configs apply to all your projects or just this one
-- Write each chosen agent's MCP server config (the codegraph usage guide is delivered by the MCP server itself, so no instructions file is added to `CLAUDE.md` / `AGENTS.md` / etc.)
-- Set up auto-allow permissions when Claude Code is one of the targets
-- Initialize your current project (local installs only)
+The installer:
+- Writes Claude Code's MCP server config (`~/.claude.json` for global, `./.mcp.json` for project-local)
+- Writes the auto-allow permissions list into `~/.claude/settings.json`
+- For local installs, also runs `codegraph init` against the current directory
 
 **Non-interactive (scripting / CI):**
 
 ```bash
-codegraph install --yes                              # auto-detect agents, install global
-codegraph install --target=cursor,claude --yes       # explicit target list
-codegraph install --target=auto --location=local     # detected agents, project-local
-codegraph install --print-config codex               # print snippet, no file writes
+codegraph install --yes                       # global, auto-allow on
+codegraph install --location=local --yes      # project-local
+codegraph install --print-config              # print snippet, no file writes
+codegraph install --no-permissions            # skip auto-allow list
 ```
 
 | Flag | Values | Default |
 |---|---|---|
-| `--target` | `auto`, `all`, `none`, or csv (`claude,cursor,...`) | prompt |
 | `--location` | `global`, `local` | prompt |
 | `--yes` | (boolean) | prompt every step |
 | `--no-permissions` | (boolean) skip Claude auto-allow list | permissions on |
-| `--print-config <id>` | dump snippet for one agent and exit | — |
-
-### 2. Restart Your Agent
-
-Restart your agent (Claude Code / Cursor / Codex CLI / opencode / Hermes Agent / Gemini CLI / Antigravity IDE / Kiro) for the MCP server to load.
-
-### 3. Initialize Projects
-
-```bash
-cd your-project
-codegraph init -i
-```
-
-Builds the per-project knowledge graph index. A single global `codegraph install` works in every project you open — no need to re-run the installer per project.
-
-That's it — your agent will use CodeGraph tools automatically when a `.codegraph/` directory exists.
+| `--print-config` | dump Claude MCP snippet and exit | — |
 
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
 
 **Install globally:**
 ```bash
-npm install -g @colbymchenry/codegraph
+npm install -g @selvakumaresra/codegraph
 ```
 
 **Add to `~/.claude.json`:**
@@ -401,7 +353,7 @@ npm install -g @colbymchenry/codegraph
 <details>
 <summary><strong>Agent Tool Guidance</strong></summary>
 
-CodeGraph's MCP server delivers its usage guidance to your agent **automatically**, in the MCP `initialize` response — there's no instructions file to manage and nothing is added to your `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. In short, it tells the agent to:
+CodeGraph's MCP server delivers its usage guidance to Claude Code **automatically**, in the MCP `initialize` response — there's no instructions file to manage and nothing is added to your `CLAUDE.md`. In short, it tells the agent to:
 
 - **Answer structural questions directly with CodeGraph** — it *is* the pre-built index, so a grep/read loop just repeats work it already did. Treat the returned source as already read.
 - **Pick the tool by intent:** `codegraph_explore` for almost anything — "how does X work", a flow/"how does X reach Y", or surveying an area (one call returns the relevant symbols' source grouped by file); `codegraph_search` to just locate a symbol; `codegraph_callers`/`codegraph_callees` to walk call flow; `codegraph_impact` before editing; `codegraph_node` for one specific symbol's full source (it returns every overload for an ambiguous name).
@@ -521,9 +473,9 @@ API, so both `import` and `require` resolve the `CodeGraph` class in your own
 process — handy for embedding it in an app (e.g. an Electron main process).
 
 ```typescript
-import CodeGraph from '@colbymchenry/codegraph';
+import CodeGraph from '@selvakumaresra/codegraph';
 // CommonJS works too:
-//   const { CodeGraph } = require('@colbymchenry/codegraph');
+//   const { CodeGraph } = require('@selvakumaresra/codegraph');
 
 const cg = await CodeGraph.init('/path/to/project');
 // Or: const cg = await CodeGraph.open('/path/to/project');
@@ -548,7 +500,7 @@ that drive the graph directly: `DatabaseConnection`, `QueryBuilder`,
 
 **Embedding requirements**
 
-- Install from npm (`npm i @colbymchenry/codegraph`) so the matching
+- Install from npm (`npm i @selvakumaresra/codegraph`) so the matching
   per-platform package — which carries the compiled library and its
   dependencies — is fetched alongside the shim.
 - The API runs on **your** runtime, so it needs **Node 22.5+** for the built-in
@@ -596,18 +548,7 @@ See [Get Started](#get-started) for the one-line install commands.
 
 ## Supported Agents
 
-The interactive installer auto-detects and configures each of these — wiring up
-the MCP server (which delivers its own usage guidance, so no instructions file
-is written):
-
-- **Claude Code**
-- **Cursor**
-- **Codex CLI**
-- **opencode**
-- **Hermes Agent**
-- **Gemini CLI**
-- **Antigravity IDE**
-- **Kiro**
+**Claude Code only.** This fork strips the upstream's Cursor / Codex / opencode / Hermes / Gemini / Antigravity / Kiro installers so the installer and tests cover one agent. If you need multi-agent support, use [upstream `colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph) instead.
 
 ## Supported Languages
 
@@ -644,22 +585,12 @@ is written):
 
 **MCP hits `database is locked`** — current builds shouldn't: CodeGraph bundles its own Node runtime and uses Node's built-in `node:sqlite` in WAL mode, where concurrent reads never block on a writer. If you still see it:
 
-- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh` (macOS/Linux), `irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex` (Windows), or `npm i -g @colbymchenry/codegraph@latest`.
+- **You're on an old (pre-0.9) install.** Reinstall: `npm i -g @selvakumaresra/codegraph@latest`.
 - **`codegraph status` shows `Journal:` other than `wal`** — WAL couldn't be enabled on this filesystem (common on network shares and WSL2 `/mnt`), so reads can block on writes. Move the project (with its `.codegraph/` folder) onto a local disk.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `codegraph serve --mcp` works from the command line.
 
 **Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `codegraph sync` manually if needed. Check that the file's language is supported and isn't inside a `.gitignore`d or default-excluded directory (e.g. `node_modules`, `dist`).
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=colbymchenry%2Fcodegraph&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=colbymchenry/codegraph&type=date&legend=top-left" />
- </picture>
-</a>
 
 ## License
 
@@ -669,8 +600,8 @@ MIT
 
 <div align="center">
 
-**Made for AI coding agents — Claude Code, Cursor, Codex CLI, opencode, Hermes Agent, Gemini CLI, Antigravity IDE, and Kiro**
+**Made for Claude Code**
 
-[Report Bug](https://github.com/colbymchenry/codegraph/issues) · [Request Feature](https://github.com/colbymchenry/codegraph/issues)
+[Report Bug](https://github.com/selvakumarEsra/codegraph/issues) · [Request Feature](https://github.com/selvakumarEsra/codegraph/issues)
 
 </div>
